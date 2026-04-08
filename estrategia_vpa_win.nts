@@ -1,0 +1,212 @@
+// ==========================================================================
+// ESTRATÉGIA VPA (Volume Price Analysis) PARA WIN - MINI IBOVESPA FUTURO
+// Plataforma: Profit Chart (Nelogica) | Linguagem: NTSL
+// ==========================================================================
+//
+// Baseada nas literaturas do repositório:
+//   - "Volume Price Analysis" (Anna Coulling)
+//   - "VP - Market in Profile - James Dalton"
+//
+// FUNDAMENTOS DE VPA IMPLEMENTADOS:
+//
+// O VPA (Análise de Volume e Preço) parte do princípio de que o volume é
+// a "pegada" do dinheiro inteligente (smart money / operadores institucionais).
+// Quando há volume anormalmente alto numa barra, é porque grandes players
+// estão atuando naquele ponto — seja absorvendo oferta ou distribuindo lotes.
+//
+// 1. CLÍMAX DE VENDA (Selling Climax) → SINAL DE COMPRA:
+//    - Barra com volume muito acima da média E fechamento < abertura (barra de baixa)
+//    - Indica que os vendedores estão se esgotando (panic selling)
+//    - O smart money está absorvendo a oferta (comprando)
+//    - CONFIRMAÇÃO: a barra SEGUINTE fecha acima da abertura (barra de alta)
+//    - Ação: COMPRAR (BuyAtMarket)
+//
+// 2. CLÍMAX DE COMPRA (Buying Climax) → SINAL DE VENDA:
+//    - Barra com volume muito acima da média E fechamento > abertura (barra de alta)
+//    - Indica que os compradores estão se esgotando (euforia / distribuição)
+//    - O smart money está distribuindo posições (vendendo)
+//    - CONFIRMAÇÃO: a barra SEGUINTE fecha abaixo da abertura (barra de baixa)
+//    - Ação: VENDER A DESCOBERTO (SellShortAtMarket)
+//
+// REFERÊNCIA DE MERCADO PROFILE (James Dalton):
+//    O conceito de "Outros Participantes de Prazo" (OTP/OTF) do Market Profile
+//    complementa o VPA: o volume de clímax frequentemente marca o ponto onde
+//    o OTF encerra sua atividade, criando zonas de reversão de valor.
+//
+// ATIVO: WIN (Mini Ibovespa Futuro - B3) | Ticker: WINmês+ano (ex.: WINM25)
+// TIMEFRAME RECOMENDADO: 5 ou 15 minutos (day trade)
+// ==========================================================================
+
+// --------------------------------------------------------------------------
+// PARÂMETROS DE ENTRADA
+// Estes valores podem ser ajustados pelo usuário na plataforma Profit Chart
+// --------------------------------------------------------------------------
+input
+    // --- Detecção de Volume ---
+    // Multiplicador para identificar spike de volume.
+    // Ex: 1.5 = o volume da barra deve ser >= 150% da média para ser clímax.
+    // Valores típicos: 1.3 (mais sensível) a 2.0 (mais seletivo)
+    LimiarVolumeSpike (1.5)
+
+    // Número de barras para calcular a média de volume de referência.
+    // Valores típicos: 14 a 30 barras.
+    PeriodoLookback (20)
+
+    // --- Execução ---
+    // Quantidade de contratos WIN por operação.
+    QuantidadeContratos (1)
+
+    // --- Gestão de Risco (em pontos do WIN) ---
+    // Stop Loss: máximo de pontos permitidos contra a posição.
+    // 1 ponto WIN = R$ 0,20 | Ex: 500 pontos = R$ 100 de risco por contrato.
+    StopLossPontos (500)
+
+    // Take Profit: objetivo de ganho em pontos a favor da posição.
+    // Ex: 1000 pontos = R$ 200 de ganho potencial por contrato (risco/retorno 1:2).
+    TakeProfitPontos (1000)
+end;
+
+// --------------------------------------------------------------------------
+// VARIÁVEIS INTERNAS
+// --------------------------------------------------------------------------
+var
+    // Média do volume no período de lookback
+    MediaVolume : Float;
+
+    // Threshold de volume: acima deste valor é considerado clímax
+    LimiarVolume : Float;
+
+    // Flags de detecção de padrões VPA na barra ANTERIOR [1]
+    ClimaxBaixa : Boolean;  // Clímax de Venda: alto volume + barra de baixa
+    ClimaxAlta  : Boolean;  // Clímax de Compra: alto volume + barra de alta
+
+    // Classificação da barra ATUAL (0 = corrente)
+    BarraDeAlta  : Boolean;  // Barra de alta: Close > Open
+    BarraDeBaixa : Boolean;  // Barra de baixa: Close < Open
+
+    // Preço de entrada registrado para cálculo de stop e alvo
+    EntradaPreco : Float;
+end;
+
+// --------------------------------------------------------------------------
+// LÓGICA PRINCIPAL DA ESTRATÉGIA
+// Executada barra a barra pelo motor NTSL
+// --------------------------------------------------------------------------
+begin
+
+    // ----------------------------------------------------------------------
+    // PASSO 1: Calcular média de volume do período de lookback
+    //
+    // Average(série, período) retorna a média aritmética dos últimos N valores.
+    // Multiplicamos pela threshold para obter o nível mínimo de "clímax".
+    // ----------------------------------------------------------------------
+    MediaVolume  := Average(Volume, PeriodoLookback);
+    LimiarVolume := MediaVolume * LimiarVolumeSpike;
+
+    // ----------------------------------------------------------------------
+    // PASSO 2: Classificar a barra ATUAL e a barra ANTERIOR
+    //
+    // No NTSL, o índice [1] acessa o valor de 1 barra atrás.
+    // Sem índice = barra corrente (em formação ou fechada, conforme o modo).
+    //
+    // Barra de Alta  (Up Bar)   : fechamento ACIMA da abertura → compradores
+    // Barra de Baixa (Down Bar) : fechamento ABAIXO da abertura → vendedores
+    // ----------------------------------------------------------------------
+    BarraDeAlta  := Close > Open;
+    BarraDeBaixa := Close < Open;
+
+    // ----------------------------------------------------------------------
+    // PASSO 3: Detectar padrões de clímax na barra ANTERIOR [1]
+    //
+    // CLÍMAX DE VENDA (Selling Climax):
+    //   Volume[1] >= LimiarVolume  → volume anormalmente alto
+    //   Close[1] < Open[1]         → barra de baixa (força vendedora)
+    //   → Os vendedores se esgotaram. Potencial reversão para alta.
+    //
+    // CLÍMAX DE COMPRA (Buying Climax):
+    //   Volume[1] >= LimiarVolume  → volume anormalmente alto
+    //   Close[1] > Open[1]         → barra de alta (força compradora)
+    //   → Os compradores se esgotaram. Potencial reversão para baixa.
+    // ----------------------------------------------------------------------
+    ClimaxBaixa := (Volume[1] >= LimiarVolume) and (Close[1] < Open[1]);
+    ClimaxAlta  := (Volume[1] >= LimiarVolume) and (Close[1] > Open[1]);
+
+    // ----------------------------------------------------------------------
+    // PASSO 4: Sinais de entrada — somente quando sem posição aberta
+    //          (Position = 0 evita duplas entradas)
+    // ----------------------------------------------------------------------
+
+    // --- SINAL DE COMPRA (Buy Signal — Reversão pós-Clímax de Venda) ---
+    //
+    // Condição composta (duas barras):
+    //   [Barra -1] Clímax de Venda: alto volume + fechamento < abertura
+    //   [Barra  0] Confirmação de alta: fechamento > abertura
+    //
+    // Interpretação VPA: A barra de clímax mostrou pânico de venda com
+    // volume anormal. A barra de confirmação prova que o smart money absorveu
+    // toda aquela oferta e agora está conduzindo o preço para cima.
+    //
+    if ClimaxBaixa and BarraDeAlta and (Position = 0) then
+    begin
+        EntradaPreco := Close;
+        BuyAtMarket(QuantidadeContratos);
+    end;
+
+    // --- SINAL DE VENDA A DESCOBERTO (Sell Short — Reversão pós-Clímax de Compra) ---
+    //
+    // Condição composta (duas barras):
+    //   [Barra -1] Clímax de Compra: alto volume + fechamento > abertura
+    //   [Barra  0] Confirmação de baixa: fechamento < abertura
+    //
+    // Interpretação VPA: A barra de clímax mostrou euforia compradora com
+    // volume anormal (distribuição pelo smart money). A barra de confirmação
+    // prova que a demanda se esgotou e a pressão vendedora assumiu o controle.
+    //
+    if ClimaxAlta and BarraDeBaixa and (Position = 0) then
+    begin
+        EntradaPreco := Close;
+        SellShortAtMarket(QuantidadeContratos);
+    end;
+
+    // ----------------------------------------------------------------------
+    // PASSO 5: Gestão de posição — Stop Loss e Take Profit
+    //
+    // Os alvos são calculados em pontos a partir do preço de entrada.
+    // WIN: 1 ponto = R$ 0,20 por contrato.
+    // ----------------------------------------------------------------------
+
+    // Gestão da posição COMPRADA (Long):
+    //   Stop Loss  : fecha a compra se o preço cair StopLossPontos abaixo da entrada
+    //   Take Profit: fecha a compra se o preço subir TakeProfitPontos acima da entrada
+    if Position > 0 then
+    begin
+        if Close < (EntradaPreco - StopLossPontos) then
+        begin
+            // Stop Loss acionado: limite de perda atingido
+            SellAtMarket(QuantidadeContratos);
+        end
+        else if Close >= (EntradaPreco + TakeProfitPontos) then
+        begin
+            // Take Profit acionado: objetivo de ganho atingido
+            SellAtMarket(QuantidadeContratos);
+        end;
+    end;
+
+    // Gestão da posição VENDIDA (Short):
+    //   Stop Loss  : cobre o short se o preço subir StopLossPontos acima da entrada
+    //   Take Profit: cobre o short se o preço cair TakeProfitPontos abaixo da entrada
+    if Position < 0 then
+    begin
+        if Close > (EntradaPreco + StopLossPontos) then
+        begin
+            // Stop Loss acionado: limite de perda atingido
+            BuyToCoverAtMarket(QuantidadeContratos);
+        end
+        else if Close <= (EntradaPreco - TakeProfitPontos) then
+        begin
+            // Take Profit acionado: objetivo de ganho atingido
+            BuyToCoverAtMarket(QuantidadeContratos);
+        end;
+    end;
+
+end;
